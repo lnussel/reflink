@@ -1,0 +1,6 @@
+[submodule "rpm2extents"]
+	path = rpm2extents
+	url = https://github.com/lnussel/rpm2extents.git
+[submodule "websolv"]
+	path = websolv
+	url = https://github.com/lnussel/websolv.git

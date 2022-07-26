@@ -1,11 +1,12 @@
 #!/bin/bash
 set -e
-websolv="http://dhcp144.future.suse.de/websolv"
 force=
 if [ -n "%1" -a "$1" = "--force" ]; then
 	force=1
 	shift
 fi
+
+test -d websolv || { echo "need to clone websolv first" >&2; false; }
 
 cleanup()
 {
@@ -24,10 +25,7 @@ for version in "${versions[@]}"; do
 	[ -n "$wantversion" ] && [ "$version" != "$wantversion" ] && continue
 	[ -z "$force" ] && [ -d "$version" ] && continue
 	mkdir -p $version/packages
-	curl -s -f -X POST --data-binary @small_bootable.t \
-		--header "Accept: application/metalink4+xml" \
-		-o $version/.packages.meta4 \
-		"$websolv/solve?distribution=Tumbleweed-$version"
+	websolv/Deptool.py -C "Tumbleweed-$version" parse small_bootable.t --metalink > $version/.packages.meta4
 	while read file; do
 		[ -e "pool/${file##*/}" ] || continue
 		mkdir -p "$version/packages/${file%/*}"

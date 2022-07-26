@@ -36,6 +36,7 @@ for version in "${versions[@]}"; do
 	while read file; do
 		ln "$file" "data/pool/${file##*/}"
 	done < <(find "data/$version" -type f -links 1 -name '*.rpm')
+	./reflinkall "$version"
 	[ -z "$wantversion" ] || break
 done
 unset version

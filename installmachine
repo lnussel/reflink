@@ -13,9 +13,10 @@ fi
 ostree="$dest/.ostree/trees/$version"
 packages="$dest/.ostree/packages/$version"
 do_cleanup=
+created=
 
 cleanup() {
-	[ -n "$do_cleanup" ] || return
+	[ -n "$do_cleanup" ] || return 0
 	echo "removing incomplete $version"
 	[ "$dest" = "/" ] || btrfs subvolume delete "$dest/.ostree"
 	btrfs subvolume delete "$ostree"
@@ -25,7 +26,7 @@ trap cleanup EXIT
 
 if [ -e "$dest" ]; then
 	oversion=$(readlink "$dest/usr")
-	oversion="${oversion#.ostree/trees}"
+	oversion="${oversion#.ostree/trees/}"
 	oversion="${oversion%/usr}"
 fi
 if ! [ -e "$ostree" ]; then
@@ -56,16 +57,19 @@ if ! [ -e "$ostree" ]; then
 	echo rsync "${rsync_args[@]}"
 	rsync "${rsync_args[@]}"
 	"${rpm[@]}" -r "$ostree" -i "$packages"/*
-	btrfs prop set -t s "$ostree" ro true
+	# make sure it exists
+	mkdir -p "$ostree/usr/local/bin"
 fi
-ln -sf "${ostree#$dest/}/usr" "$dest/"
+if [ -z "$oversion" -o "$oversion" != "$version"  ]; then
+	ln -sf "${ostree#$dest/}/usr" "$dest/"
+fi
 do_cleanup=
 if [ -z "$oversion" ]; then
 	mkdir -p "$dest/root/bin"
-	cp "${rpm[0]}" $dest/root/bin/busybox
+	cp "${rpm[0]}" $dest/usr/local/bin/busybox
 	for i in wget rpm; do
 		[ -e $dest/usr/bin/$i -o -L $dest/usr/bin/$i ] && continue
-		ln -s busybox $dest/root/bin/$i
+		ln -s busybox $dest/usr/local/bin/$i
 	done
 	# avoid systemd-firstboot as console is not connected with machined
 	systemd-machine-id-setup --root $dest
@@ -73,3 +77,4 @@ if [ -z "$oversion" ]; then
 	cat /etc/resolv.conf > "$dest/etc/resolv.conf"
 	echo "run machinectl start $name"
 fi
+[ -n "$created" ] || btrfs prop set -t s "$ostree" ro true

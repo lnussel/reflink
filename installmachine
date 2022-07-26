@@ -1,0 +1,75 @@
+#!/bin/bash
+set -e
+rsync_url="dhcp237.future.suse.de::reflink"
+if [ -e /.ostree ]; then
+	dest=/
+	version="${1:?}"
+else
+	rpm=(${0%/*}/busybox rpm)
+	name="${1:?}"
+	version="${2:?}"
+	dest="/var/lib/machines/$name"
+fi
+ostree="$dest/.ostree/trees/$version"
+packages="$dest/.ostree/packages/$version"
+do_cleanup=
+
+cleanup() {
+	[ -n "$do_cleanup" ] || return
+	echo "removing incomplete $version"
+	[ "$dest" = "/" ] || btrfs subvolume delete "$dest/.ostree"
+	btrfs subvolume delete "$ostree"
+}
+
+trap cleanup EXIT
+
+if [ -e "$dest" ]; then
+	oversion=$(readlink "$dest/usr")
+	oversion="${oversion#.ostree/trees}"
+	oversion="${oversion%/usr}"
+fi
+if ! [ -e "$ostree" ]; then
+	rsync_src="$rsync_url/$version/extents/"
+	if ! [ -d "$dest" ]; then
+		btrfs subvolume create "$dest"
+		btrfs subvolume create "$dest/.ostree"
+		mkdir -p "$dest"/{etc,proc,sys,dev,var/log/journal,tmp,run}
+		for i in bin sbin lib lib64; do
+			ln -s usr/$i "$dest/$i"
+		done
+		for i in root home opt srv; do
+			mkdir -p "$dest/var/$i"
+			ln -s var/$i "$dest/$i"
+		done
+	fi
+	do_cleanup=1
+	mkdir -p "$packages"
+	mkdir -p "${ostree%/*}"
+	btrfs subvolume create "$ostree"
+	# there are two ways to do this. An alternative to rsync using
+	# hardlinks would be to create a subvol for packages, snapshotting a
+	# potential previous one.
+	rsync_args=(-a --usermap="*:root" --groupmap="*:root" --chmod 0444 "$rsync_src" "$packages/")
+	if [ -n "$oversion" ] && [ -e "$dest/.ostree/packages/$oversion/" ]; then
+		rsync_args+=(-v --link-dest "$dest/.ostree/packages/$oversion/")
+	fi
+	echo rsync "${rsync_args[@]}"
+	rsync "${rsync_args[@]}"
+	"${rpm[@]}" -r "$ostree" -i "$packages"/*
+	btrfs prop set -t s "$ostree" ro true
+fi
+ln -sf "${ostree#$dest/}/usr" "$dest/"
+do_cleanup=
+if [ -z "$oversion" ]; then
+	mkdir -p "$dest/root/bin"
+	cp "${rpm[0]}" $dest/root/bin/busybox
+	for i in wget rpm; do
+		[ -e $dest/usr/bin/$i -o -L $dest/usr/bin/$i ] && continue
+		ln -s busybox $dest/root/bin/$i
+	done
+	# avoid systemd-firstboot as console is not connected with machined
+	systemd-machine-id-setup --root $dest
+	# XXX
+	cat /etc/resolv.conf > "$dest/etc/resolv.conf"
+	echo "run machinectl start $name"
+fi

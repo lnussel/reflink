@@ -1,0 +1,19 @@
+#!/bin/bash
+set -e
+versions="$@"
+if [ -z "$versions" ]; then
+	versions=(*/packages)
+	versions=("${versions[@]%/*}")
+fi
+mkdir -p pool/extents
+for version in "${versions[@]}"; do
+	test -d "$version/packages" || continue
+	mkdir -p "$version/extents"
+	while read file; do
+		[ -e "pool/extents/${file##*/}" ] || /space/lnussel/git/rpm2extents/rpm2extents.py "$file" > "pool/extents/${file##*/}"
+		name=$(rpm -qp --qf '%{name}' "$file")
+		[ -e "$version/extents/${name}.rpm" ] && continue
+		ln pool/extents/${file##*/} "$version/extents/${name}.rpm"
+		echo "$name" >> "$version/list"
+	done < <(find "$version/packages" -name '*.rpm')
+done

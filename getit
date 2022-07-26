@@ -1,0 +1,43 @@
+#!/bin/bash
+set -e
+websolv="http://dhcp144.future.suse.de/websolv"
+force=
+if [ -n "%1" -a "$1" = "--force" ]; then
+	force=1
+	shift
+fi
+
+cleanup()
+{
+	if [ -n "$version" ]; then
+		echo "$version is incomplete"
+		[ -e "$version/.download.log" ] && grep ERROR "$version/.download.log"
+		rm -r "$version"/packages
+	fi
+}
+trap cleanup EXIT
+wantversion="$1"
+URL="http://download.opensuse.org/history"
+versions=($(curl --fail --silent $URL/list))
+mkdir -p pool
+for version in "${versions[@]}"; do
+	[ -n "$wantversion" ] && [ "$version" != "$wantversion" ] && continue
+	[ -z "$force" ] && [ -d "$version" ] && continue
+	mkdir -p $version/packages
+	curl -s -f -X POST --data-binary @small_bootable.t \
+		--header "Accept: application/metalink4+xml" \
+		-o $version/.packages.meta4 \
+		"$websolv/solve?distribution=Tumbleweed-$version"
+	while read file; do
+		[ -e "pool/${file##*/}" ] || continue
+		mkdir -p "$version/packages/${file%/*}"
+		ln -f "pool/${file##*/}" "$version/packages/$file"
+	done < <(sed -ne 's/.*file name="\([^"]\+\)".*/\1/p' $version/.packages.meta4)
+	aria2c -q --continue -M $version/.packages.meta4 -d $version/packages -l "$version/.download.log" --log-level info
+	du -sh $version
+	while read file; do
+		ln "$file" "pool/${file##*/}"
+	done < <(find "$version" -type f -links 1 -name '*.rpm')
+	[ -z "$wantversion" ] || break
+done
+unset version

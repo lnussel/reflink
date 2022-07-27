@@ -1,42 +1,63 @@
 #!/bin/bash
 set -e
-force=
-if [ -n "%1" -a "$1" = "--force" ]; then
-	force=1
-	shift
-fi
+
+file="${1:?}"
+name="${file%%.*}"
+distro="${2:-Tumbleweed}"
+dest=
 
 test -d websolv || { echo "need to clone websolv first" >&2; false; }
+test -d rpm2extents || { echo "need to clone rpm2extents first"; false; }
 
 cleanup()
 {
-	if [ -n "$version" ]; then
-		echo "$version is incomplete"
-		[ -e "data/$version/.download.log" ] && grep ERROR "data/$version/.download.log"
-		rm -r "data/$version"/packages
+	if [ -n "$dest" ]; then
+		echo "$name@$version is incomplete"
+		[ -e "$dest/.download.log" ] && grep ERROR "$dest/.download.log"
+		rm -r "$dest/packages"
 	fi
 }
 trap cleanup EXIT
-wantversion="$1"
-URL="http://download.opensuse.org/history"
-versions=($(curl --fail --silent $URL/list))
-mkdir -p data/pool
-for version in "${versions[@]}"; do
-	[ -n "$wantversion" ] && [ "$version" != "$wantversion" ] && continue
-	[ -z "$force" ] && [ -d "data/$version" ] && continue
-	mkdir -p data/$version/packages
-	websolv/Deptool.py -C "Tumbleweed-$version" parse small_bootable.t --metalink > data/$version/.packages.meta4
-	while read file; do
-		[ -e "data/pool/${file##*/}" ] || continue
-		mkdir -p "data/$version/packages/${file%/*}"
-		ln -f "data/pool/${file##*/}" "data/$version/packages/$file"
-	done < <(sed -ne 's/.*file name="\([^"]\+\)".*/\1/p' data/$version/.packages.meta4)
-	aria2c -q --continue -M data/$version/.packages.meta4 -d data/$version/packages -l "data/$version/.download.log" --log-level info
-	du -sh data/$version
-	while read file; do
-		ln "$file" "data/pool/${file##*/}"
-	done < <(find "data/$version" -type f -links 1 -name '*.rpm')
-	./reflinkall "$version"
-	[ -z "$wantversion" ] || break
+pool="data/pool"
+mkdir -p "$pool"
+mkdir -p "data/$name"
+version=1
+old=
+while [ -e "data/$name/$version" ]; do
+	old="data/$name/$version"
+	version=$((version+1))
 done
-unset version
+
+websolv/Deptool.py -C "$distro" parse "$file" --metalink --explain="*" > ".packages.meta4"
+if [ -n "$old" ] && cmp -s ".packages.meta4" "$old/.packages.meta4"; then
+	echo "no change" >&2
+	exit 0
+fi
+
+dest="data/$name/$version"
+mkdir -p "$dest/packages"
+mv .packages.meta4 "$dest"
+while read -r file; do
+	[ -e "$pool/${file##*/}" ] || continue
+	mkdir -p "$dest/packages/${file%/*}"
+	ln -f "$pool/${file##*/}" "$dest/packages/$file"
+done < <(sed -ne 's/.*file name="\([^"]\+\)".*/\1/p' $dest/.packages.meta4)
+aria2c -q --continue -M $dest/.packages.meta4 -d $dest/packages -l "$dest/.download.log" --log-level info
+while read -r file; do
+	ln "$file" "$pool/${file##*/}"
+done < <(find "$dest" -type f -links 1 -name '*.rpm')
+
+mkdir -p $pool/extents
+mkdir -p "$dest/extents"
+
+while read file; do
+	[ -e "$pool/extents/${file##*/}" ] || rpm2extents/rpm2extents.py "$file" > "$pool/extents/${file##*/}"
+	name=$(rpm -qp --qf '%{name}' "$file")
+	[ -e "$dest/extents/${name}.rpm" ] && continue
+	ln $pool/extents/${file##*/} "$dest/extents/${name}.rpm"
+	echo "$name" >> "$dest/list"
+done < <(find "$dest/packages" -name '*.rpm')
+
+du -sh $dest/extents $dest/packages
+
+unset dest # success, don't clean up

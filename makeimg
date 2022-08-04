@@ -1,0 +1,142 @@
+#!/bin/bash
+set -e
+
+name="${1:?}"
+packages="${2:?}"
+size="${3:-2G}"
+osname="opensuse-tumbleweed"
+loop=
+# XXX: create in /run
+mp=/mnt
+layout='
+label: gpt
+
+size=100M, type=${uuid[esp]}
+type=${uuid[root]}
+'
+
+#size=500M, type=${uuid[root]}
+#type=${uuid[usr]}
+
+declare -A uuid
+init_uuids()
+{
+	while read -r n u; do
+		[ "$n" = "NAME" ] && continue
+		uuid[$n]=$u
+	done < <(systemd-id128 show -u usr root esp)
+}
+
+cleanup()
+{
+	if [ -n "$loop" ]; then
+		losetup -d "$loop"
+	fi
+	if [ -n "$mp" ]; then
+		umount -R "$mp"
+	fi
+}
+trap cleanup EXIT
+
+init_uuids
+
+eval layout="\"$layout\""
+
+if [[ "${packages##*/}" =~ ^[0-9]+$ ]]; then
+	rev="${packages##*/}"
+fi
+
+dd if=/dev/zero of="$name" bs=1 seek="$size" count=0 status=none
+loop=$(losetup --show -fP "$name")
+echo "$layout" | sfdisk -q "$loop"
+
+# EFI
+mkfs.vfat "${loop}p1"
+
+mkfs.btrfs -q "${loop}p2"
+mount "${loop}p2" "$mp"
+btrfs subvolume create "$mp/@auto/"
+btrfs subvolume create "$mp/@auto/root-$osname@1"
+btrfs subvolume create "$mp/@auto/usr-$osname@$rev"
+# XXX is it really always 257? :-)
+btrfs subvolume set-default 257 "$mp"
+umount "$mp"
+# TODO: figure out loop dev used
+losetup -d "$loop"
+unset loop
+systemd-dissect -m "$name" "$mp"
+#mount "${loop}p2" "$mp"
+# root fs layout
+mkdir -p "$mp"/{etc,proc,sys,dev,var/tmp,var/log/journal,tmp,run,usr,boot/efi}
+for i in bin sbin lib lib64; do
+	ln -s usr/$i "$mp/$i"
+done
+for i in root home opt srv; do
+	mkdir -p "$mp/var/$i"
+	ln -s var/$i "$mp/$i"
+done
+read -r rootdev rootuuid < <(findmnt -nvo "SOURCE,UUID" $mp)
+mount -o subvol="@auto/usr-$osname@$rev" "$rootdev" "$mp/usr"
+
+## prepare separate usr tree
+#mkfs.btrfs -q "${loop}p3"
+#mount "${loop}p3" "$mp/usr"
+#btrfs subvolume create "$mp/usr/@auto/"
+#btrfs subvolume create "$mp/usr/@auto/$osname@$rev+3"
+## XXX is it really always 257? :-)
+#btrfs subvolume set-default 257 "$mp/usr"
+#umount "$mp/usr"
+#mount "${loop}p3" "$mp/usr"
+#
+
+mkdir -p "$mp/usr/lib/sysimage/rpm-headers"
+cp "$packages"/extents/* "$mp/usr/lib/sysimage/rpm-headers"
+for i in "$mp/usr/lib/sysimage/rpm-headers"/*; do
+	#echo "${i##*/}"
+	echo -n .
+	./busybox rpm --root "$mp" --force --only-prefix /usr --justfs -i "$i"
+done
+echo
+mkdir -p "$mp/usr/local/bin"
+cp busybox $mp/usr/local/bin/busybox
+for i in wget rpm; do
+	[ -e "$mp/usr/bin/$i" -o -L "$mp/usr/bin/$i" ] && continue
+	ln -s busybox $mp/usr/local/bin/$i
+done
+
+### bootloader
+
+ENTRY_TOKEN=Default
+# XXX: use entry token for newer systemd
+echo "MACHINE_ID=$ENTRY_TOKEN" > "$mp/usr/lib/kernel/install.conf"
+#bootctl install --no-variables --install-source=image --make-entry-directory=yes --entry-token=os-id --root="$mp"
+install -D -m 444 "$mp"/usr/lib/systemd/boot/efi/systemd-bootx64.efi "$mp/efi/EFI/BOOT/BOOTX64.EFI"
+install -D -m 444 "$mp"/usr/lib/systemd/boot/efi/systemd-bootx64.efi "$mp/efi/EFI/systemd/systemd-bootx64.efi"
+#
+mkdir -p "$mp/efi/$ENTRY_TOKEN"
+mkdir -p "$mp/efi/loader/entries"
+for k in "$mp"/usr/lib/modules/*/vmlinuz; do
+	kv="${k%/*}"
+	kv="${kv##*/}"
+	kf="/$ENTRY_TOKEN/$kv/linux"
+	initrd="${kf%/*}/initrd"
+	install -D -m 444 "$k" "$mp/efi$kf"
+	cat > "$mp/efi/loader/entries/$ENTRY_TOKEN-$kv.conf" <<-EOF
+	title       openSUSE Tumbleweed@rev
+	version     $kv
+	machine-id  $ENTRY_TOKEN
+	sort-key    $osname
+	options     root=UUID=$rootuuid rootflags=subvol=@auto/root-$osname@1 mount.usr=UUID=$rootuuid mount.usrflags=subvol=@auto/usr-$osname@$rev console=ttyS0,115200 console=tty0 quiet
+	linux       $kf
+	initrd      $initrd
+	EOF
+
+	systemd-nspawn -q -D "$mp" --overlay=+/usr::/usr bash -c "depmod $kv && dracut -q --no-hostonly --no-hostonly-default-device --no-hostonly-cmdline --no-hostonly-default-device -o 'plymouth i18n network kernel-modules kernel-modules-extra multipath' -d btrfs '/efi/$initrd' '$kv'"
+done
+
+tree "$mp/efi"
+
+# XXX
+cat /etc/resolv.conf > "$mp/etc/resolv.conf"
+
+btrfs prop set -t s "$mp/usr" ro true

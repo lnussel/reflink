@@ -55,8 +55,8 @@ while read file; do
 	name=$(rpm -qp --qf '%{name}' "$file")
 	[ -e "$dest/extents/${name}.rpm" ] && continue
 	ln $pool/extents/${file##*/} "$dest/extents/${name}.rpm"
-	echo "$name" >> "$dest/list"
-done < <(find "$dest/packages" -name '*.rpm')
+	echo "$name"
+done < <(find "$dest/packages" -name '*.rpm') | sort > "$dest/list"
 
 du -sh $dest/extents $dest/packages
 

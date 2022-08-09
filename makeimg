@@ -5,6 +5,7 @@ name="${1:?}"
 packages="${2:?}"
 size="${3:-2G}"
 osname="opensuse-tumbleweed"
+arch='x86_64'
 loop=
 # XXX: create in /run
 mp=/mnt
@@ -24,7 +25,7 @@ init_uuids()
 	while read -r n u; do
 		[ "$n" = "NAME" ] && continue
 		uuid[$n]=$u
-	done < <(systemd-id128 show -u usr root esp)
+	done < <(systemd-id128 show -u usr root esp swap)
 }
 
 cleanup()
@@ -46,6 +47,12 @@ if [[ "${packages##*/}" =~ ^[0-9]+$ ]]; then
 	rev="${packages##*/}"
 fi
 
+declare -A volume
+volume[root]="root-$arch:$osname@1"
+volume[usr]="usr-$arch:$osname@$rev"
+volume[sysimage]="sysimage-$arch:$osname@$rev"
+volume[var]="var-$osname"
+
 dd if=/dev/zero of="$name" bs=1 seek="$size" count=0 status=none
 loop=$(losetup --show -fP "$name")
 echo "$layout" | sfdisk -q "$loop"
@@ -56,8 +63,9 @@ mkfs.vfat "${loop}p1"
 mkfs.btrfs -q "${loop}p2"
 mount "${loop}p2" "$mp"
 btrfs subvolume create "$mp/@auto/"
-btrfs subvolume create "$mp/@auto/root-$osname@1"
-btrfs subvolume create "$mp/@auto/usr-$osname@$rev"
+for v in root usr sysimage var; do # keep order
+	btrfs subvolume create "$mp/@auto/${volume[$v]}"
+done
 # XXX is it really always 257? :-)
 btrfs subvolume set-default 257 "$mp"
 umount "$mp"
@@ -67,16 +75,21 @@ unset loop
 systemd-dissect -m "$name" "$mp"
 #mount "${loop}p2" "$mp"
 # root fs layout
-mkdir -p "$mp"/{etc,proc,sys,dev,var/tmp,var/log/journal,tmp,run,usr,boot/efi}
+mkdir -p "$mp"/{etc,proc,sys,dev,var,tmp,run,usr,boot/efi,mnt}
 for i in bin sbin lib lib64; do
 	ln -s usr/$i "$mp/$i"
+done
+
+read -r rootdev rootuuid < <(findmnt -nvo "SOURCE,UUID" $mp)
+mount -o subvol="@auto/${volume[usr]}" "$rootdev" "$mp/usr"
+mount -o subvol="@auto/${volume[var]}" "$rootdev" "$mp/var"
+for i in tmp log/journal; do
+	mkdir -p "$mp/var/$i"
 done
 for i in root home opt srv; do
 	mkdir -p "$mp/var/$i"
 	ln -s var/$i "$mp/$i"
 done
-read -r rootdev rootuuid < <(findmnt -nvo "SOURCE,UUID" $mp)
-mount -o subvol="@auto/usr-$osname@$rev" "$rootdev" "$mp/usr"
 
 ## prepare separate usr tree
 #mkfs.btrfs -q "${loop}p3"
@@ -89,6 +102,9 @@ mount -o subvol="@auto/usr-$osname@$rev" "$rootdev" "$mp/usr"
 #mount "${loop}p3" "$mp/usr"
 #
 
+mkdir -p "$mp/usr/lib/sysimage"
+mount -o subvol="@auto/${volume[sysimage]}" "$rootdev" "$mp/usr/lib/sysimage"
+# XXX: need to change to sysimage/packages
 mkdir -p "$mp/usr/lib/sysimage/rpm-headers"
 cp "$packages"/extents/* "$mp/usr/lib/sysimage/rpm-headers"
 for i in "$mp/usr/lib/sysimage/rpm-headers"/*; do
@@ -103,6 +119,14 @@ for i in wget rpm; do
 	[ -e "$mp/usr/bin/$i" -o -L "$mp/usr/bin/$i" ] && continue
 	ln -s busybox $mp/usr/local/bin/$i
 done
+
+### fstab
+
+# XXX: use generator for that
+cat > "$mp/etc/fstab" <<-EOF
+UUID=$rootuuid /var btrfs subvol=@auto/${volume[var]}
+UUID=$rootuuid /usr/lib/sysimage btrfs subvol=@auto/${volume[sysimage]}
+EOF
 
 ### bootloader
 
@@ -126,17 +150,52 @@ for k in "$mp"/usr/lib/modules/*/vmlinuz; do
 	version     $kv
 	machine-id  $ENTRY_TOKEN
 	sort-key    $osname
-	options     root=UUID=$rootuuid rootflags=subvol=@auto/root-$osname@1 mount.usr=UUID=$rootuuid mount.usrflags=subvol=@auto/usr-$osname@$rev console=ttyS0,115200 console=tty0 quiet
+	options     root=UUID=$rootuuid rootflags=subvol=@auto/${volume[root]} mount.usr=UUID=$rootuuid mount.usrflags=subvol=@auto/${volume[usr]} console=tty0 console=ttyS0,115200 quiet
 	linux       $kf
 	initrd      $initrd
 	EOF
 
-	systemd-nspawn -q -D "$mp" --overlay=+/usr::/usr bash -c "depmod $kv && dracut -q --no-hostonly --no-hostonly-default-device --no-hostonly-cmdline --no-hostonly-default-device -o 'plymouth i18n network kernel-modules kernel-modules-extra multipath' -d btrfs '/efi/$initrd' '$kv'"
+	# XXX: should read deps from /var
+	systemd-nspawn -q -D "$mp" depmod $kv
+	systemd-nspawn -q -D "$mp" dracut -q \
+		--no-hostonly \
+		--no-hostonly-default-device \
+		--no-hostonly-cmdline \
+		--no-hostonly-default-device \
+		-o 'plymouth i18n network kernel-modules kernel-modules-extra multipath' \
+		-d btrfs \
+		"/efi/$initrd" "$kv"
+	systemd-nspawn -q -D "$mp" systemctl enable debug-shell.service
 done
+		#--add-drivers dmi-sysfs \
+		#--force-drivers dmi-sysfs \
 
 tree "$mp/efi"
 
 # XXX
 cat /etc/resolv.conf > "$mp/etc/resolv.conf"
+
+# firstboot wizard doesn't like empty etc? seems to be read-only
+: > "$mp/etc/machine-id"
+
+mkdir -p "$mp/etc/systemd/network"
+cat > "$mp/etc/systemd/network/80-dhcp.network" <<-EOF
+[Match]
+Name=en*
+
+[Network]
+DHCP=yes
+EOF
+mkdir -p "$mp/etc/systemd/system-preset/"
+echo "enable systemd-networkd.service" > "$mp/etc/systemd/system-preset/50-networkd.preset"
+
+cat >> "$mp/etc/fstab" <<-EOF
+build-srcdir /mnt 9p trans=virtio,version=9p2000.L
+EOF
+
+cat > "$mp/root/.profile" <<-EOF
+alias l='ls -al'
+alias o='less'
+EOF
 
 btrfs prop set -t s "$mp/usr" ro true

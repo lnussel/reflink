@@ -8,7 +8,8 @@ osname="opensuse-tumbleweed"
 arch='x86_64'
 loop=
 # XXX: create in /run
-mp=/mnt
+mp=$(mktemp -d -p /run -t mkimg.XXXXXXXXXX)
+tmpmp=$(mktemp -d -p /run -t mkimg.XXXXXXXXXX)
 layout='
 label: gpt
 
@@ -30,11 +31,14 @@ init_uuids()
 
 cleanup()
 {
-	if [ -n "$loop" ]; then
-		losetup -d "$loop"
-	fi
 	if [ -n "$mp" ]; then
-		umount -R "$mp"
+		umount -R "$mp" || true
+	fi
+	if mountpoint -q "$tmpmp"; then
+		umount -R "$tmpmp" || true
+	fi
+	if [ -n "$loop" ]; then
+		losetup -d "$loop" || true
 	fi
 }
 trap cleanup EXIT
@@ -61,26 +65,21 @@ echo "$layout" | sfdisk -q "$loop"
 mkfs.vfat "${loop}p1"
 
 mkfs.btrfs -q "${loop}p2"
-mount "${loop}p2" "$mp"
-btrfs subvolume create "$mp/@auto/"
+mount "${loop}p2" "$tmpmp"
+btrfs subvolume create "$tmpmp/@auto/"
 for v in root usr sysimage var; do # keep order
-	btrfs subvolume create "$mp/@auto/${volume[$v]}"
+	btrfs subvolume create "$tmpmp/@auto/${volume[$v]}"
 done
-# XXX is it really always 257? :-)
-btrfs subvolume set-default 257 "$mp"
-umount "$mp"
-# TODO: figure out loop dev used
-losetup -d "$loop"
-unset loop
-systemd-dissect -m "$name" "$mp"
-#mount "${loop}p2" "$mp"
+## XXX need this for now as long as systemd-dissect can't detect btrfs @auto volumes
+btrfs subvolume set-default 257 "$tmpmp"
+read -r rootdev rootuuid < <(findmnt -nvo "SOURCE,UUID" $tmpmp)
+mount -o subvol="@auto/${volume[root]}" "$rootdev" "$mp"
 # root fs layout
-mkdir -p "$mp"/{etc,proc,sys,dev,var,tmp,run,usr,boot/efi,mnt}
+mkdir -p "$mp"/{etc,proc,sys,dev,var,tmp,run,usr,efi,mnt}
 for i in bin sbin lib lib64; do
 	ln -s usr/$i "$mp/$i"
 done
-
-read -r rootdev rootuuid < <(findmnt -nvo "SOURCE,UUID" $mp)
+mount "${loop}p1" "$mp/efi"
 mount -o subvol="@auto/${volume[usr]}" "$rootdev" "$mp/usr"
 mount -o subvol="@auto/${volume[var]}" "$rootdev" "$mp/var"
 for i in tmp log/journal; do

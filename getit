@@ -59,5 +59,6 @@ while read file; do
 done < <(find "$dest/packages" -name '*.rpm') | sort > "$dest/list"
 
 du -sh $dest/extents $dest/packages
+rpm -qp $dest/extents/systemd.rpm
 
 unset dest # success, don't clean up

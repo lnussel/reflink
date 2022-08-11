@@ -7,7 +7,6 @@ size="${3:-2G}"
 osname="opensuse-tumbleweed"
 arch='x86_64'
 loop=
-# XXX: create in /run
 mp=$(mktemp -d -p /run -t mkimg.XXXXXXXXXX)
 tmpmp=$(mktemp -d -p /run -t mkimg.XXXXXXXXXX)
 layout='
@@ -49,6 +48,9 @@ eval layout="\"$layout\""
 
 if [[ "${packages##*/}" =~ ^[0-9]+$ ]]; then
 	rev="${packages##*/}"
+else
+	rev="$(find "$packages" -maxdepth 1 -mindepth 1 -type d -printf "%P\n"|grep -e '^[0-9]\+$'|sort -nr|head -1)"
+	packages="$packages/$rev"
 fi
 
 declare -A volume
@@ -105,7 +107,7 @@ mkdir -p "$mp/usr/lib/sysimage"
 mount -o subvol="@auto/${volume[sysimage]}" "$rootdev" "$mp/usr/lib/sysimage"
 # XXX: need to change to sysimage/packages
 mkdir -p "$mp/usr/lib/sysimage/rpm-headers"
-cp "$packages"/extents/* "$mp/usr/lib/sysimage/rpm-headers"
+rsync -a --chmod 444 --chown root:root "$packages"/extents/ "$mp/usr/lib/sysimage/rpm-headers/"
 for i in "$mp/usr/lib/sysimage/rpm-headers"/*; do
 	#echo "${i##*/}"
 	echo -n .
@@ -144,12 +146,13 @@ for k in "$mp"/usr/lib/modules/*/vmlinuz; do
 	kf="/$ENTRY_TOKEN/$kv/linux"
 	initrd="${kf%/*}/initrd"
 	install -D -m 444 "$k" "$mp/efi$kf"
-	cat > "$mp/efi/loader/entries/$ENTRY_TOKEN-$kv.conf" <<-EOF
-	title       openSUSE Tumbleweed@rev
+	cat > "$mp/efi/loader/entries/$ENTRY_TOKEN-$kv@$rev.conf" <<-EOF
+	title       openSUSE Tumbleweed@$rev
 	version     $kv
 	machine-id  $ENTRY_TOKEN
 	sort-key    $osname
-	options     root=UUID=$rootuuid rootflags=subvol=@auto/${volume[root]} mount.usr=UUID=$rootuuid mount.usrflags=subvol=@auto/${volume[usr]} console=tty0 console=ttyS0,115200 quiet
+	# XXX rw because of boo#1156421 ?
+	options     root=UUID=$rootuuid rootflags=rw,subvol=@auto/${volume[root]} mount.usr=UUID=$rootuuid mount.usrflags=ro,subvol=@auto/${volume[usr]} console=tty0 console=ttyS0,115200 quiet
 	linux       $kf
 	initrd      $initrd
 	EOF
@@ -164,18 +167,34 @@ for k in "$mp"/usr/lib/modules/*/vmlinuz; do
 		-o 'plymouth i18n network kernel-modules kernel-modules-extra multipath' \
 		-d btrfs \
 		"/efi/$initrd" "$kv"
-	systemd-nspawn -q -D "$mp" systemctl enable debug-shell.service
 done
-		#--add-drivers dmi-sysfs \
-		#--force-drivers dmi-sysfs \
+systemd-nspawn -q -D "$mp" systemctl enable debug-shell.service
+
+#systemd.log_level=debug
+#--add-drivers dmi-sysfs \
+#--force-drivers dmi-sysfs \
 
 tree "$mp/efi"
+
+systemd-nspawn -q -D "$mp" busybox rpm -q systemd
 
 # XXX
 cat /etc/resolv.conf > "$mp/etc/resolv.conf"
 
 # firstboot wizard doesn't like empty etc? seems to be read-only
-: > "$mp/etc/machine-id"
+#: > "$mp/etc/machine-id"
+
+#cat > "$mp/etc/systemd/system.conf" <<-EOF
+#[Manager]
+#LogLevel=debug
+#EOF
+
+mkdir -p "$mp/etc/systemd/system/systemd-sysusers.service.d"
+cat > "$mp/etc/systemd/system/systemd-sysusers.service.d/override.conf" <<-EOF
+[Service]
+LoadCredential=passwd.hashed-password.systemd-timesync
+LoadCredential=passwd.plaintext-password.systemd-timesync
+EOF
 
 mkdir -p "$mp/etc/systemd/network"
 cat > "$mp/etc/systemd/network/80-dhcp.network" <<-EOF
@@ -196,5 +215,8 @@ cat > "$mp/root/.profile" <<-EOF
 alias l='ls -al'
 alias o='less'
 EOF
+
+# XXX: package
+install -D -m 444 snapshots.sh "$mp/usr/lib/kernel/snapshots.sh"
 
 btrfs prop set -t s "$mp/usr" ro true

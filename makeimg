@@ -114,26 +114,22 @@ for i in "$mp/usr/lib/sysimage/rpm-headers"/*; do
 	./busybox rpm --root "$mp" --force --only-prefix /usr --justfs -i "$i"
 done
 echo
-mkdir -p "$mp/usr/local/bin"
-cp busybox $mp/usr/local/bin/busybox
+# XXX!
+rm "$mp/usr/bin/rpm"
+cp busybox $mp/usr/bin/busybox
 for i in wget rpm; do
 	[ -e "$mp/usr/bin/$i" -o -L "$mp/usr/bin/$i" ] && continue
-	ln -s busybox $mp/usr/local/bin/$i
+	ln -s busybox $mp/usr/bin/$i
 done
-
-### fstab
-
-# XXX: use generator for that
-cat > "$mp/etc/fstab" <<-EOF
-UUID=$rootuuid /var btrfs subvol=@auto/${volume[var]}
-UUID=$rootuuid /usr/lib/sysimage btrfs subvol=@auto/${volume[sysimage]}
-EOF
 
 ### bootloader
 
-ENTRY_TOKEN=Default
+ENTRY_TOKEN=opensuse-tumbleweed
+#ENTRY_TOKEN=Default
 # XXX: use entry token for newer systemd
-echo "MACHINE_ID=$ENTRY_TOKEN" > "$mp/usr/lib/kernel/install.conf"
+#echo "MACHINE_ID=$ENTRY_TOKEN" > "$mp/usr/lib/kernel/install.conf"
+mkdir -p "$mp/etc/kernel"
+echo "$ENTRY_TOKEN" > "$mp/etc/kernel/entry-token"
 #bootctl install --no-variables --install-source=image --make-entry-directory=yes --entry-token=os-id --root="$mp"
 install -D -m 444 "$mp"/usr/lib/systemd/boot/efi/systemd-bootx64.efi "$mp/efi/EFI/BOOT/BOOTX64.EFI"
 install -D -m 444 "$mp"/usr/lib/systemd/boot/efi/systemd-bootx64.efi "$mp/efi/EFI/systemd/systemd-bootx64.efi"
@@ -143,32 +139,37 @@ mkdir -p "$mp/efi/loader/entries"
 for k in "$mp"/usr/lib/modules/*/vmlinuz; do
 	kv="${k%/*}"
 	kv="${kv##*/}"
-	kf="/$ENTRY_TOKEN/$kv/linux"
-	initrd="${kf%/*}/initrd"
-	install -D -m 444 "$k" "$mp/efi$kf"
-	cat > "$mp/efi/loader/entries/$ENTRY_TOKEN-$kv@$rev.conf" <<-EOF
-	title       openSUSE Tumbleweed@$rev
-	version     $kv
-	machine-id  $ENTRY_TOKEN
-	sort-key    $osname
-	# XXX rw because of boo#1156421 ?
-	options     root=UUID=$rootuuid rootflags=rw,subvol=@auto/${volume[root]} mount.usr=UUID=$rootuuid mount.usrflags=ro,subvol=@auto/${volume[usr]} console=tty0 console=ttyS0,115200 quiet
-	linux       $kf
-	initrd      $initrd
-	EOF
+#	kf="/$ENTRY_TOKEN/$kv/linux"
+#	initrd="${kf%/*}/initrd"
+#	install -D -m 444 "$k" "$mp/efi$kf"
+#	cat > "$mp/efi/loader/entries/$ENTRY_TOKEN-$kv@$rev.conf" <<-EOF
+#	title       openSUSE Tumbleweed@$rev
+#	version     $kv
+#	machine-id  $ENTRY_TOKEN
+#	sort-key    $osname
+#	# XXX rw because of boo#1156421 ?
+#	options     root=UUID=$rootuuid rootflags=rw,subvol=@auto/${volume[root]} mount.usr=UUID=$rootuuid mount.usrflags=ro,subvol=@auto/${volume[usr]} console=tty0 console=ttyS0,115200 quiet
+#	linux       $kf
+#	initrd      $initrd
+#	EOF
 
 	# XXX: should read deps from /var
 	systemd-nspawn -q -D "$mp" depmod $kv
-	systemd-nspawn -q -D "$mp" dracut -q \
-		--no-hostonly \
-		--no-hostonly-default-device \
-		--no-hostonly-cmdline \
-		--no-hostonly-default-device \
-		-o 'plymouth i18n network kernel-modules kernel-modules-extra multipath' \
-		-d btrfs \
-		"/efi/$initrd" "$kv"
+
+	cat > "$mp/etc/dracut.conf" <<-EOF
+	hostonly="no"
+	hostonly_cmdline="no"
+	add_drivers+=" btrfs "
+	omit_dracutmodules+=" plymouth i18n network kernel-modules kernel-modules-extra multipath "
+	stdloglvl="3"
+	EOF
+	echo "root=UUID=$rootuuid rootflags=rw,subvol=@auto/${volume[root]} mount.usr=UUID=$rootuuid mount.usrflags=ro,subvol=@auto/${volume[usr]} console=tty0 console=ttyS0,115200 quiet" > "$mp/etc/kernel/cmdline"
+
+	systemd-nspawn -q -D "$mp" -ESNAPSHOT="$rev" -ESUBVOL="@auto/${volume[usr]}" kernel-install -v add "$kv" "${k#$mp}"
+	rm "$mp/etc/kernel/cmdline"
 done
 systemd-nspawn -q -D "$mp" systemctl enable debug-shell.service
+systemd-nspawn -q -D "$mp" systemctl enable systemd-resolved.service
 
 #systemd.log_level=debug
 #--add-drivers dmi-sysfs \
@@ -179,7 +180,15 @@ tree "$mp/efi"
 systemd-nspawn -q -D "$mp" busybox rpm -q systemd
 
 # XXX
-cat /etc/resolv.conf > "$mp/etc/resolv.conf"
+#cat /etc/resolv.conf > "$mp/etc/resolv.conf"
+
+# XXX
+grep -v '^\(passwd\|group\|shadow\)' "$mp/usr/etc/nsswitch.conf" > "$mp/etc/nsswitch.conf"
+cat >> "$mp/etc/nsswitch.conf" <<-EOF
+passwd:         compat systemd
+group:          compat [SUCCESS=merge] systemd
+shadow:         compat systemd
+EOF
 
 # firstboot wizard doesn't like empty etc? seems to be read-only
 #: > "$mp/etc/machine-id"
@@ -218,5 +227,9 @@ EOF
 
 # XXX: package
 install -D -m 444 snapshots.sh "$mp/usr/lib/kernel/snapshots.sh"
+
+install -D -m 555 subvol-mount-generator "$mp/usr/lib/systemd/system-generators/subvol-mount-generator"
+
+install -D -m 555 updater "$mp/usr/bin/updater"
 
 btrfs prop set -t s "$mp/usr" ro true

@@ -122,6 +122,9 @@ for i in wget rpm; do
 	ln -s busybox $mp/usr/bin/$i
 done
 
+# FIXME: no root dir option
+rm -f "$mp/usr/lib/kernel/install.d/50-depmod.install"
+
 ### bootloader
 
 ENTRY_TOKEN=opensuse-tumbleweed

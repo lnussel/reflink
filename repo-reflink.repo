@@ -1,0 +1,9 @@
+[repo-reflink]
+name=lnussel home project for reflink stuff
+enabled=1
+autorefresh=1
+baseurl=https://download.opensuse.org/repositories/home:/lnussel:/reflink/openSUSE_Factory/
+path=/
+type=rpm-md
+keeppackages=0
+priority=50

@@ -1,0 +1,11 @@
+# preparation
+
+   ln -s $PWD/repo-reflink.repo websolv/deptool/Tumbleweed/repos/repo-reflink.repo
+   websolv/Deptool.py -C Tumbleweed ref
+
+   ./getit small-kvm.t
+
+   rm -f testimg.raw && sudo ./makeimg testimg.raw data/small-kvm
+
+   ./run_qemu testimg.raw
+

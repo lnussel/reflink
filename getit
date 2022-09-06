@@ -60,5 +60,6 @@ done < <(find "$dest/packages" -name '*.rpm') | sort > "$dest/list"
 
 du -sh $dest/extents $dest/packages
 rpm -qp $dest/extents/systemd.rpm
+rpm -qp $dest/extents/busybox.rpm
 
 unset dest # success, don't clean up

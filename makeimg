@@ -54,10 +54,10 @@ else
 fi
 
 declare -A volume
-volume[root]="root-$arch:$osname@1"
+volume[root]="root-$arch:$osname"
 volume[usr]="usr-$arch:$osname@$rev"
 volume[sysimage]="sysimage-$arch:$osname@$rev"
-volume[var]="var-$osname"
+volume[var]="var:$osname"
 
 dd if=/dev/zero of="$name" bs=1 seek="$size" count=0 status=none
 loop=$(losetup --show -fP "$name")
@@ -111,12 +111,11 @@ rsync -a --chmod 444 --chown root:root "$packages"/extents/ "$mp/usr/lib/sysimag
 for i in "$mp/usr/lib/sysimage/rpm-headers"/*; do
 	#echo "${i##*/}"
 	echo -n .
-	./busybox rpm --root "$mp" --force --only-prefix /usr --justfs -i "$i"
+	busybox rpm --root "$mp" --force --only-prefix /usr --justfs -i "$i"
 done
 echo
 # XXX!
 rm "$mp/usr/bin/rpm"
-cp busybox $mp/usr/bin/busybox
 for i in wget rpm; do
 	[ -e "$mp/usr/bin/$i" -o -L "$mp/usr/bin/$i" ] && continue
 	ln -s busybox $mp/usr/bin/$i

@@ -1,0 +1,164 @@
+#!/bin/bash
+sucess=0
+url="dhcp237.future.suse.de::reflink/small-kvm/"
+#
+#
+set -e
+if ! mountpoint -q /usr/lib/sysimage; then
+	echo "/usr/lib/sysimage is not a mountpoint"
+	exit 1
+fi
+sysimage="$(btrfs subvol show /usr/lib/sysimage|head -1)"
+dev=$(findmnt -nvo "SOURCE" /usr/lib/sysimage)
+oldrev="${sysimage##*@}"
+newrev="$(rsync "$url" |awk '/[0-9]$/{if (r < $NF) r=$NF}END{print r}')"
+newsysimage="${sysimage%@*}@$newrev"
+newusr=
+
+if [ "$sysimage" = "${sysimage#@auto/sysimage-}" ]; then
+	echo "invalid subvolume" >%2
+	exit 1
+fi
+
+if [ "$oldrev" = "$newrev" ]; then
+	test -t 1 && echo "no change"
+	exit 0
+fi
+
+echo "$oldrev -> $newrev"
+
+mp=$(mktemp -d -p /run -t updater.XXXXXXXXXX)
+cleanup() {
+	# XXX
+	#btrfs subvolume delete "$mp/top/$newsysimage" || true
+	#[ -z "$newusr" ] || btrfs subvol delete "$mp/top/$newusr"
+	# /XXX
+	if [ -n "$mp" ]; then
+		mountpoint -q "$mp/root/efi" && umount "$mp/root/efi"
+		if [ "$sucess" != 1 ]; then
+			btrfs subvolume delete "$mp/top/$newsysimage" || true
+			[ -z "$newusr" ] || btrfs subvol delete "$mp/top/$newusr"
+		fi
+		{ mountpoint -q "$mp/top" && umount -R "$mp/top"; } || true
+		rmdir --ignore-fail-on-non-empty "$mp/top" || true
+		{ mountpoint -q "$mp/root/usr" && umount -R "$mp/root/usr"; } || true
+		rmdir --ignore-fail-on-non-empty "$mp/root" || true
+		rmdir --ignore-fail-on-non-empty "$mp" || true
+	fi
+}
+trap cleanup EXIT
+
+mkdir "$mp/top"
+mount "$dev" -o "subvol=/" "$mp/top"
+btrfs subvolume snapshot "$mp/top/$sysimage" "$mp/top/$newsysimage"
+ls -al "$mp/top/$newsysimage"
+# get updated packages
+rsync -av --usermap="*:root" --groupmap="*:root" --chmod 0444 --delete "$url/$newrev/extents/" "$mp/top/$newsysimage/rpm-headers/"
+
+# install new packages
+newusr="${newsysimage/sysimage-/usr-}"
+btrfs subvolume create "$mp/top/$newusr"
+mkdir -p "$mp/root/usr"
+mount "$dev" -o "subvol=$newusr" "$mp/root/usr"
+for i in "$mp/top/$newsysimage/rpm-headers/"*.rpm; do
+	echo -n .
+	/usr/bin/busybox rpm --root "$mp/root" --force --only-prefix /usr --justfs -i "$i"
+done
+echo
+# XXX: copy our stuff that we didn't package
+for i in \
+	/usr/lib/kernel/snapshots.sh \
+	/usr/lib/systemd/system-generators/subvol-mount-generator \
+	/usr/bin/updater
+	do
+	cp "$i" "$mp/root/$i"
+done
+rm -f "$mp/root/usr/bin/rpm"
+for i in wget rpm; do
+	[ -e "$mp/root/usr/bin/$i" -o -L "$mp/root/usr/bin/$i" ] && continue
+	ln -s busybox $mp/root/usr/bin/$i
+done
+rm -f "$mp/root/usr/lib/kernel/install.d/50-depmod.install"
+
+# /XXX
+
+shopt -s nullglob
+export SUBVOL="$newusr"
+export SNAPSHOT="$newrev"
+###
+# XXX for dracut and depmod
+export sysroot_l="$mp/root"
+export TMPDIR="/var/tmp"
+export systemdutildir=/usr/lib/systemd
+export systemdutilconfdir=/etc/systemd
+
+# need to create basic structure
+for i in bin sbin lib lib64; do
+	ln -s usr/$i "$mp/root/$i"
+done
+for i in tmp var/tmp etc/kernel root; do
+	mkdir -p "$mp/root/$i"
+done
+# XXX: figure out what crap needs this
+grep root /etc/passwd > "$mp/root/etc/passwd"
+grep root /etc/shadow > "$mp/root/etc/shadow"
+grep root /etc/group > "$mp/root/etc/group"
+cp /etc/dracut.conf "$mp/root/etc"
+# this shit doesn't work with root dir https://github.com/dracutdevs/dracut/pull/1011
+cat >> "$mp/root/etc/dracut.conf" <<-EOF
+environment=/usr/lib/environment.d
+environmentconfdir=/etc/environment.d
+dbus=/usr/share/dbus-1
+dbusinterfaces=/usr/share/dbus-1/interfaces
+dbusservices=/usr/share/dbus-1/services
+dbussession=/usr/share/dbus-1/session.d
+dbussystem=/usr/share/dbus-1/system.d
+dbussystemservices=/usr/share/dbus-1/system-services
+dbusconfdir=/etc/dbus-1
+dbusinterfacesconfdir=/etc/dbus-1/interfaces
+dbusservicesconfdir=/etc/dbus-1/services
+dbussessionconfdir=/etc/dbus-1/session.d
+dbussystemconfdir=/etc/dbus-1/system.d
+dbussystemservicesconfdir=/etc/dbus-1/system-services
+sysctld=/usr/lib/sysctl.d
+sysctlconfdir=/etc/sysctl.d
+systemdutildir=/usr/lib/systemd
+systemdutilconfdir=/etc/systemd
+systemdcatalog=/usr/lib/systemd/catalog
+systemdntpunits=/usr/lib/systemd/ntp-units.d
+systemdntpunitsconfdir=/etc/systemd/ntp-units.d
+systemdportable=/usr/lib/systemd/portable
+systemdportableconfdir=/etc/systemd/portable
+systemdsystemunitdir=/usr/lib/systemd/system
+systemdsystemconfdir=/etc/systemd/system
+systemduser=/usr/lib/systemd/user
+systemduserconfdir=/etc/systemd/user
+sysusers=/usr/lib/sysusers.d
+sysusersconfdir=/etc/sysusers.d
+udevdir=/usr/lib/udev
+EOF
+cp /etc/kernel/entry-token "$mp/root/etc/kernel"
+
+mkdir -p "$mp/root/efi"
+mount --bind /efi "$mp/root/efi"
+###
+
+ls -al $mp/root
+
+for k in "$mp"/root/usr/lib/modules/*/vmlinuz; do
+	kv="${k%/*}"
+	kv="${kv##*/}"
+
+	# XXX: should read deps from /var
+	chroot "$mp/root" /sbin/depmod $kv
+
+	#chroot "$mp/root" /usr/bin/kernel-install -v add "$kv" "${k#$mp/root}"
+	/usr/bin/kernel-install -v add "$kv" "$k"
+done
+
+# set new snapshot readonly. should be done earlier but needed here
+# due to depmod
+btrfs prop set -t s "$mp/root/usr" ro true
+
+sucess=1
+echo "Done!"

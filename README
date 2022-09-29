@@ -9,3 +9,33 @@
 
    ./run_qemu testimg.raw
 
+# General idea
+
+x86_64 UEFI system. The partition table is GPT that adheres to
+discoverable partitions for the EFI and "root" volume. The "root"
+volume however contains a BTRFS with further sub-volumes. Ie the
+root volume itself, /usr and /var.
+
+The naming is in a way that a systemd generator can produce mount
+units automatically.
+
+    # btrfs subvol list /
+    ID 256 gen 11 top level 5 path @auto
+    ID 257 gen 20 top level 256 path @auto/root-x86_64:opensuse-tumbleweed
+    ID 258 gen 14 top level 256 path @auto/usr-x86_64:opensuse-tumbleweed@10
+    ID 259 gen 14 top level 256 path @auto/sysimage-x86_64:opensuse-tumbleweed@10
+    ID 260 gen 21 top level 256 path @auto/var-opensuse-tumbleweed
+
+The boot loader config tells the initrd which OS to mount:
+
+    # cat /efi/loader/entries/opensuse-tumbleweed-5.18.15-1-kvmsmall-10.conf
+    title      openSUSE Tumbleweed@10
+    version    5.18.15-1-kvmsmall
+    sort-key   opensuse-tumbleweed
+    options    root=UUID=131dfa26-c7e6-4a7c-a8a0-2d43cf1fbd9f rootflags=rw,subvol=@auto/root-x86_64:opensuse-tumbleweed mount.usr=UUID=131dfa26-c7e6-4a7c-a8a0-2d43cf1fbd9f mount.usrflags=ro,subvol=@auto/usr-x86_64:opensuse-tumbleweed@10 console=tty0 console=ttyS0,115200 quiet
+    linux      /opensuse-tumbleweed/5.18.15-1-kvmsmall/linux
+    initrd     /opensuse-tumbleweed/5.18.15-1-kvmsmall/initrd
+
+OS updates will create a new revision of the usr subvolume, eg
+@auto/usr-x86_64:opensuse-tumbleweed@11, then call kernel-install
+which would create a new boot loader config for that OS revision.
